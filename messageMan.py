@@ -63,6 +63,8 @@ def wrappedRunMethod(targetob, method, kwargs):
         print( {'fail': 'exception', 'type':str(exc_type), 'value':str(exc_value)
                 , 'trace':(''.join(traceback.format_tb(exc_traceback)) )
                 , 'fromlink':0})
+        if not kwargs is None:
+            print("Using arguments", kwargs)
 
 class baseSocket():
     def __init__(self, framework, iosocket, targetob, name, reportGone=None):
