@@ -8,7 +8,19 @@ from tkinter import Frame
 import json
 from pootleWatched import watchable, watchableInt
 import astroangles as asa
+import messageMan_tk
 import pathlib
+
+"""
+An extension of tkinter using (mostly) ttk that enables gui to be defined in dicts with persistent data and use in a stylised way to 
+simplify use. 
+
+changelog:
+    23/6/17: removed print statements from combofield
+            made finding named funtion (as in 'command' generic and extended combofield to allow values in drop down to be made
+            from a function, allow for a fields widget to be setup before the constructor for Field is called, other minor fixes and adjustments
+            change combofield to generate dropdown list on demand (allows for list to change dynamically easily)
+"""
 
 class Field():
     """
@@ -46,14 +58,14 @@ class Field():
         if fvalue is None:
             self.fval = self.fielddef.get('value', None)
         else:
-            print('create ', self.myname, ' (', str(type(self)), ')', ' using value: ', str(fvalue)) 
             self.fval = fvalue
         if isinstance(self.fval, watchable):
             self.watchkey = self.fval.setWatch(self.updateFromWatched, True)
         else:
             self.watchkey = None
-        self.widg=None
-        if 'persist' in self.fielddef:
+        if getattr(self,'widg',None) is None:
+            self.widg=None
+        if 'persist' in self.fielddef and not 'valueref' in self.fielddef: # ignore persist for ref'ed values
             self.pfield.makeChildValue(self.myname, self.getValue())
 
     def widgetClass(self):
@@ -71,25 +83,26 @@ class Field():
             self.widg.configure(style=self.fielddef['style'])
         if 'font' in self.fielddef:
             self.setFont(self.fielddef['font'])
-        if 'command' in self.fielddef:
-            comm = self.fielddef['command']
-            if callable(comm):
-                self.addCommand(comm)
-            else:
-                if 'comfield' in self.fielddef:
-                    targf = self.getRelative(self.fielddef['comfield'])
-                else:
-                    targf = self
-                try:
-                    cfunc = getattr(targf,comm)
-                except AttributeError:
-                    print('Failed to find ', self.fielddef['command'], 'in ', str(type(targf)),'(',targf.myname,')', 'when building ButtonField ',self.myname)
-                    raise
-                self.addCommand(cfunc)
+        cfunc = self._fetchFunction('comfield','command')
+        if not cfunc is None:
+            self.addCommand(cfunc)
         if 'autohelp' in self.fielddef:
-            self.autohelper = autohelp(self.widg,self.fielddef['autohelp'])
-
+            self.autohelper = autohelp(self,self.fielddef['autohelp'])
         self._updateDisplay()
+
+    def _fetchFunction(self,fieldname, funcname):
+        if funcname in self.fielddef:
+            if fieldname in self.fielddef:
+                targf = self.getRelative(self.fielddef[fieldname])
+            else:
+                targf = self
+            try:
+                return getattr(targf,self.fielddef[funcname])
+            except AttributeError:
+                print('Failed to find ', self.fielddef[funcname], 'in ', str(type(targf)),'(',targf.myname,')', 'when building ButtonField ',self.myname)
+                raise
+        else:
+            return None
 
     def setFont(self, fontname):
         try:
@@ -125,13 +138,26 @@ class Field():
         if isinstance(self.fval, watchable):
             self.fval.val = newval
         else:
-            self.fval = newval
+            refdict, refkey = self.getrefinfo()
+            if refdict is None:
+                self.fval = newval
+            else:
+                print("setValue setting", refkey, 'to', newval, 'from', refdict[refkey], 'in', refdict)
+                refdict[refkey] = newval
         self._updateDisplay()
 
     def getValue(self):
         if isinstance(self.fval, watchable):
             return self.fval.val
-        return self.fval
+        else:
+            refdict, refkey = self.getrefinfo()
+            if refdict is None:
+                return self.fval
+            else:
+                if not refkey in refdict:
+                    refdict[refkey] = self.fielddef['value']
+                    print("setValue adds key", refkey)
+                return refdict[refkey]
 
     def _updateDisplay(self):
         if self.widg is None:
@@ -156,20 +182,14 @@ class Field():
         hierarchically fetches the child field identified by rpath
         
         rpath: A string or tuple that identifies another field in the field hierarchy
-            if a string then it is a '.' separated sequence of names (no '.' means it is a child of this frame)
-                    '..' at the start of the string means start from the parent with the remainder of the string
+            if a string then it is a '/' separated sequence of names (no '/' means it is a child of this frame)
+                    '..' means start from the parent with the remainder of the string / tuple
             if a tuple then an ordered sequence of names, the sequence can start with 1 or more '..' to navigate 
                     to parent fields
+        
+        '../../child1/grandchild3'  -> grandparent-> child named child1 -> child named grandchild3
         """
-        if isinstance(rpath,str):
-            if rpath.startswith('..'):
-                if len(rpath) > 2:
-                    return self.pfield.getRelative(rpath[2:])
-                else:
-                    return self.pfield
-            targ = rpath.split('.')
-        else:
-            targ = rpath
+        targ = rpath.split('/') if isinstance(rpath,str) else rpath
         if targ[0]=='..':
             if len(targ) == 1:
                 return self.pfield
@@ -180,11 +200,63 @@ class Field():
             return ch.getRelative(targ[1:])
         return ch
 
+    def getsubvalref(self, bdict, vrpath):
+        basedict = self.fval if bdict is None else bdict
+        if len(vrpath) == 1:
+#            print('getsubvalref final twig', basedict, '->', vrpath[0], 'from field', self.myname)
+            return basedict, vrpath[0]
+        else:
+            dkey=vrpath[0]
+            if dkey.startswith('#') and dkey.endswith('#'):
+                akey = self.getValue()
+#                print('getsubvalref key',akey, 'from value', dkey, 'in field', self.myname)
+            else:
+                akey = dkey
+            if not akey in basedict:
+#                print("adding dict", akey, 'to', basedict)
+                basedict[akey] = {}
+            return self.getsubvalref(basedict[akey], vrpath[1:])
+
+    def getsubvaldict(self, vrpath):
+        if len(vrpath) == 0:
+            return self.getValue()
+        if vrpath[0] == '..':
+#            print("getRelativeValue using parent and", vrpath[1:])
+            return self.pfield.getRelativeValue(vrpath[1:])
+        elif isinstance(vrpath[0],str):
+#            print("getRelativeValue using child",vrpath[0],"remaining->",vrpath[1:])
+            try:
+                return self.children[vrpath[0]].getRelativeValue(vrpath[1:])
+            except KeyError:
+                print("getRelative path child (", vrpath[0], ")not present in", self.myname)
+                raise
+        elif isinstance(vrpath[0],tuple):
+#            print("getref----------------------->", vrpath[0])
+            namefromref = self.getRelativeValue(vrpath[0])
+#            print("getref yields --------------->", namefromref)
+            if namefromref is None:
+                return None
+            else:
+                return self.children[namefromref].getRelativeValue(vrpath[1:])
+        else:
+            print("CONFUSED", vrpath[0])
+            return None
+
+    def getrefinfo(self):
+        if 'valueref' in self.fielddef:
+            reffield = self.getRelative(self.fielddef['valueref'])
+            return reffield.getsubvalref(None, self.fielddef['subval'])
+        else:
+            return None, None
+
     def saveme(self):
         if 'persist' in self.fielddef:
             return self.myname, self.getValue()
         else:
             return None
+
+    def getRoot(self):
+        return tkroot
 
 class ButtonField(Field):
     """
@@ -250,12 +322,12 @@ class CyclicButtonField(ButtonField):
     def makeWidget(self):
         self.callthis = None
         super().makeWidget()
-        self.widg.configure(command=self.lbclick)
+        self.widg.configure(command=self.cbclick)
 
     def addCommand(self, cfunc):
         self.callthis = cfunc
 
-    def lbclick(self):
+    def cbclick(self):
         validvals = self.fielddef['values']
         cind = validvals.index(self.getValue()) + 1
         if cind >= len(validvals):
@@ -297,7 +369,6 @@ class ShowhideButton(CyclicButtonField):
         super().makeWidget()
         if self.getValue() == 'S':
             self.widg.after_idle(self.showhide)
-
 
 class TextField(Field):
     """
@@ -349,9 +420,11 @@ class InOutField(Field):
             self.tksvar.set(textcontent)
 
     def userUpdateComplete(self,event):
+        print('userupdateComplete triggered for', self.myname)
         validVal = self.userUpdateValid()
         if validVal is None:
-            pass # flashy error thing
+            print("invalid flash", self.myname)
+            self.flasher(count=8)
             return
         self.setValue(validVal)
         if not self.callthis is None:
@@ -362,6 +435,19 @@ class InOutField(Field):
 
     def addCommand(self, cfunc):
         self.callthis = cfunc
+
+    def flasher(self, count=None):
+        if self.widg is None:
+            return
+        if not count is None:
+            self.flashcount = count
+        self.flashcount -=1
+        ofon = ('!invalid',) if self.flashcount % 2 == 0 else ('invalid',)
+        self.widg.state(statespec=ofon)
+        if self.flashcount > 0:
+            self.widg.after(300,self.flasher)
+        else:
+            self._updateWidgetContent(self.getValue())
 
 class FloatField(InOutField):
     def userUpdateValid(self):
@@ -381,6 +467,7 @@ class IntField(InOutField):
             newval = int(self.tksvar.get())
         except:
             return None
+        
         if 'minval' in self.fielddef and newval < self.fielddef['minval']:
             return None
         if 'maxval' in self.fielddef and newval > self.fielddef['maxval']:
@@ -407,6 +494,17 @@ class AngField(InOutField):
             self.fval = getattr(__import__('astroangles'),self.dataclass)(cval)
             self._updateDisplay()
 
+    def setValue(self, newval):
+#        refdict, refkey = self.getrefinfo()
+#        if refdict is None:
+#            self.fval = newval
+#        else:
+#            print("setValue setting", refkey, 'to', newval, 'from', refdict[refkey], 'in', refdict)
+#            refdict[refkey] = newval
+        if self.fval.deg != newval:
+            self.fval.deg=newval
+            self._updateDisplay()
+
     def _updateDisplay(self):
         if self.widg is None:
             return
@@ -416,7 +514,7 @@ class AngField(InOutField):
                 vval = format(vval,self.fielddef['format'])
             except ValueError:
                 print('Value Error processing a ', str(type(vval)), 'using >', self.fielddef['format']
-                    , '<.', ' in field ', self.myname, '(LatField._updateDisplay)')
+                    , '<.', ' in field ', self.myname, '(AngField._updateDisplay)')
                 vval='EEEEK'
         self._updateWidgetContent(vval)
 
@@ -424,7 +522,7 @@ class AngField(InOutField):
         try:
             self.getValue().set(self.tksvar.get())
         except:
-            pass # flashy error thing
+            self.flasher(count=8)
             return
         if not self.callthis is None:
             self.callthis(self, self.getValue())
@@ -438,18 +536,14 @@ class AngField(InOutField):
 class ComboField(InOutField):
     """
     A comboField re-interprets 'readonly' to mean that only values in the valuelist can be selected, if this is not present
-    then the user can type in new values
+    then the user can type in new values.
+    
+    The drop down list is always built on demand and can be:
+        predefined (using 'values' keyword in the definition)
+        or fetched using a function named using the keywords 'vffield' and 'vfunc'.
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        print("combo field with readonly ...", 'readonly' in self.fielddef)
-        if 'readonly' in self.fielddef:
-            validvals = self.fielddef['values']
-            if not callable(validvals) and not self.getValue() in validvals:
-                self.setValue(validvals[0])
-                print("value set to", validvals[0])
-            else:
-                print("value set to", self.getValue())
 
     def widgetClass(self):
         return Combobox
@@ -460,18 +554,24 @@ class ComboField(InOutField):
         self.tksvar.trace('w', self.valchanged)
 
     def makeWidget(self):
+        if 'readonly' in self.fielddef:
+            validvals = self._getcfValues()
+            if not self.getValue() in validvals:
+                self.setValue(validvals[0])
         super().makeWidget()
-        wv = self.fielddef.get('values',('empty',))
-        if callable(wv):
-            wv = wv()
-            if not self.getValue() in wv:
-                self.setValue(wv[0])
-        self.widg.configure(values=wv)
-        print("variable value is", self.getValue())
-        print(self.myname, "command is", self.callthis)
+        self.widg.configure(postcommand=self.setDropdownValues)
+
+    def setDropdownValues(self):
+        self.widg.configure(values=self._getcfValues())
+
+    def _getcfValues(self):
+        vfunc = self._fetchFunction('vffield', 'vfunc')
+        if vfunc is None:
+            return self.fielddef.get('values',('empty',))
+        else:
+            return vfunc()
 
     def valchanged(self, *args):
-        print("updated", self.myname)
         self.userUpdateComplete(None)
 
     def userUpdateValid(self):
@@ -495,14 +595,73 @@ class ComboField(InOutField):
     def getIndex(self):
         return self.widg.current()
 
+class SmartComboField(ComboField):
+    """
+    A combofield where the user can add to the set of available values by typing in a new name, and the new name is added to
+    the list in the drop down. Especially useful if the field is persistent
+    The 'value' of a ComboField (self.fval) when a field is not readonly is held as a dict which will have these keys:
+    'cfvalue': the currently selected value
+    'cflist' : the list of available values - if the user enters a new value, then this list is updated and the app is notified
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        assert 'cfvalue' in self.fval
+        assert 'cflist' in self.fval
+
+    def makeWidget(self):
+        super().makeWidget()
+        self.extendfunc = self._fetchFunction('extendfield','extendlist')
+
+    def createtkVar(self):
+        self.tksvar = tkinter.StringVar()
+        self.tksvar.set(self.getValue())
+
+    def setValue(self,newval):
+        self.fval['cfvalue'] = newval
+
+    def getValue(self):
+        return self.fval['cfvalue']
+
+    def _getcfValues(self):
+        return self.fval['cflist']
+
+    def userUpdateComplete(self, event):
+        newval = self.tksvar.get()
+        if not newval in self._getcfValues():
+            if not self.extendfunc is None:
+                self.extendfunc(self, newval)
+            self.addToList(newval)
+        if newval != self.getValue():
+            self.setValue(newval)
+            if not self.callthis is None:
+                self.callthis(self, self.getValue())
+
+    def addToList(self, newval):
+        self.fval['cflist'].append(newval)
+
+    def saveme(self):
+        if 'persist' in self.fielddef:
+            return self.myname, self.fval
+        else:
+            return None
+
 class ContainerField(Field):
     """
-    A class for fields that contain other fields 
+    A class for fields that contain other fields.
+    
+    Ths class also includes support for listeners for incoming IP connections.
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.listeners=None
+        if 'listeners' in self.fielddef:
+            self.setuplisteners(self.fielddef['listeners'])
         self._initChildren()
+
+    def setuplisteners(self, llist):
+        if self.listeners is None:
+            self.listeners = tuple(messageMan_tk.tklistener(framework=self.getRoot(), listenon=aconn, newsocketcallback=getattr(self,callback)) for aconn, callback in llist)
+        print(self.listeners)
 
     def _initChildren(self):
         if 'children' in self.fielddef:
@@ -671,11 +830,12 @@ class autohelp():
     """
     A basic class to provide tooltip style help for widgets
     """
-    def __init__(self, widget, text):
+    def __init__(self, field, text):
         """
         just declare an interest in the mouse entering or leaving the widget.
         """
-        self.widget = widget
+        self.pfield = field
+        self.widget = field.widg
         self.text = text
         self.widget.bind("<Enter>", self.enter)
         self.widget.bind("<Leave>", self.leave)
@@ -693,20 +853,24 @@ class autohelp():
         triggered on leaving the widget or its tooltip
         """
         if event.widget == self.widget:
-            # left the widget, but mouse may just be over the tooltip...
+            # left the underling widget, but mouse may just be over the tooltip...
             ww = self.widget.winfo_width()
             wh = self.widget.winfo_height()
             if not 0 < event.x < ww or not 0 < event.y < wh:
                 self.closehelp()
         elif event.widget==self.hw:
             # left the tooltip, but may still be within the widget....
-            px, py = self.widget.winfo_pointerxy()
-            wx = self.widget.winfo_rootx()
-            wy = self.widget.winfo_rooty()
-            ww = self.widget.winfo_width()
-            wh = self.widget.winfo_height()
-            if not wx < px < (wx+ww) or not  wy < py < (wy+wh):
+            if not self._ptrinside(event):
                 self.closehelp()
+
+    def checkpass(self, event):
+        # for actions like left button click, check if we're over the underlying widget and if so kick the underlying widget
+        # can't see generic way to do this atm, so a bit messy
+        if self._ptrinside(event):
+            try:
+                self.widget.invoke()
+            except:
+                print('oops')
 
     def disphelp(self):
         """
@@ -732,6 +896,7 @@ class autohelp():
                            font=("times", "10", "normal"))
             label.pack(ipadx=1)
             self.hw.bind("<Leave>", self.leave)
+            self.hw.bind("<Button-1>", self.checkpass)
 
     def closehelp(self):
         """
@@ -740,6 +905,17 @@ class autohelp():
         if not self.hw is None:
             self.hw.destroy()
             self.hw=None
+
+    def _ptrinside(self,event):
+        """
+        checks if the pointer pos in the event is inside the underlying widget
+        """
+        px, py = self.widget.winfo_pointerxy()
+        wx = self.widget.winfo_rootx()
+        wy = self.widget.winfo_rooty()
+        ww = self.widget.winfo_width()
+        wh = self.widget.winfo_height()
+        return wx < px < (wx+ww) and  wy < py < (wy+wh)
 
 class pfont():
     """
@@ -855,12 +1031,6 @@ class pfont():
         if ccode in self.busi:
             return not '-'+ccode in busi
 
-def namedfonts():
-    return tuple(pfont.allfonts.keys())
-
-def allfontlist():
-    return tuple(set(tkfont.families()))
-
 class PanelUISettings(DockablePanel):
     """
     A Panel to set various aspects of the UI - font - font size,.....
@@ -887,20 +1057,24 @@ class PanelUISettings(DockablePanel):
         bf = pfont.makefont(None, 'basefont', family=None, size=12, busi=None)
         secthead = pfont.makefont(bf,'secthead', size='+3', busi='b')
         self.s = Style()
-        self.s.configure('Astro.TEntry', fieldbackground='#353', background='#0f0', foreground='#cdc', selectbackground='#f00', selectforeground='#00f'
-                , bordercolor='#ff0')
-        self.s.map('Astro.TEntry', foreground=[('readonly','#aaa'),('','#fbb')], fieldbackground=[('readonly','#444'),('','#222')])
-        self.s.configure('Astro.TLabel', background='#121', foreground='#cdc', font=bf.wfont, padding=2)
-        self.s.configure('Secthead.TLabel',  background='#117', foreground='#ccd', font=secthead.wfont)
-        self.s.configure('Astro.TCheckbutton',  background='#411', foreground='#eee', font=bf.wfont)
+        self.s.configure('Astro.TEntry', background='#433', fieldbackground='#322',foreground='#edc', selectbackground='#edc', selectforeground='#322'
+                , bordercolor='#ff0', padding=3)
+        self.s.map('Astro.TEntry', foreground=[('readonly','#aba'),('invalid','#a33')], fieldbackground=[('readonly','#444'),('invalid','#0aa')])
+        self.s.configure('Astro.TLabel', background='#113', foreground='#cdc', font=bf.wfont, borderwidth=4, padding=2, relief='flat')
+        self.s.configure('R.Astro.TLabel', anchor='e')
+        self.s.configure('B.Astro.TLabel', anchor='s')
+        self.s.configure('eve.Astro.TLabel',foreground='#ddd', background='#353')
+        self.s.configure('odd.Astro.Tlabel',foreground='#ddd', background='#533')
+        self.s.configure('Secthead.TLabel',  background='#226', foreground='#ccd', font=secthead.wfont, padding=4, anchor='s')
+        self.s.configure('Astro.TCheckbutton',  background='#411', foreground='#eee', font=bf.wfont, padding=4)
         self.s.configure('Astro.TCombobox',  background='#411', font=bf.wfont
-                , selectbackground='#f00', selectforeground='#00f', fieldbackground='#000')
+                , selectbackground='#f00', selectforeground='#00f', fieldbackground='#000', padding=2)
         self.s.map('Astro.TCombobox', foreground=[('readonly','#aaa'),('','#fbb')], fieldbackground=[('readonly','#444'),('','#222')])
-        self.s.configure('Astro.TFrame',  background='#324', foreground='#eec')
+        self.s.configure('Astro.TFrame',  background='#324', foreground='#eec', padding=4)
         self.s.configure('Astro.TNotebook',  background='#324', foreground='#eec')
         self.s.configure('Astro.TNotebook.Tab', background='#555', foreground='#ccc', font=bf.wfont)
         self.s.map('Astro.TNotebook.Tab',background=[('selected','#222')],foreground=[('selected','#eee')])
-        self.s.configure('Astro.TButton',  background='#324', foreground='#eec', font=bf.wfont)
+        self.s.configure('Astro.TButton',  background='#324', foreground='#eec', font=bf.wfont, padding=4)
         self.s.map("Astro.TButton",
             foreground=[('pressed', 'red'), ('active', '#fff')],
             background=[('pressed', '!disabled', 'ccc'), ('active', '#435')]
@@ -911,14 +1085,20 @@ class PanelUISettings(DockablePanel):
     def setstylefonts(self):
         pass
 
+    def namedfonts(self):
+        return tuple(pfont.allfonts.keys())
+
+    def allfontlist(self):
+        return tuple(set(tkfont.families()))
+
 puiopts = {
       'class': PanelUISettings, 'name': 'puiopts', 'defdocked': True, 'defgeometry':'300x200+100+500','background': '#324'
     , 'children':(
         dockablebutton
       , {'class': TextField, 'name':'deffontlab', 'value': 'ui font:', 'style':'Secthead.TLabel'}
-      , {'class': ComboField, 'name':'deffont', 'value': '', 'values': namedfonts, 'persist':0, 'style': 'Astro.TCombobox', 'font': 'basefont'}
+      , {'class': ComboField, 'name':'deffont', 'value': '', 'vffield':'..', 'vffunc':'namedfonts', 'persist':0, 'style': 'Astro.TCombobox', 'font': 'basefont'}
       , {'class': TextField, 'name':'fnlab', 'value': 'system font:', 'style':'Astro.TLabel'}
-      , {'class': ComboField, 'name':'fontname', 'value': '', 'values': allfontlist, 'persist':0, 'readonly':1, 'style': 'Astro.TCombobox', 'font': 'basefont'}
+      , {'class': ComboField, 'name':'fontname', 'value': '', 'vffield':'..', 'vfunc': 'allfontlist', 'persist':0, 'readonly':1, 'style': 'Astro.TCombobox', 'font': 'basefont'}
       , {'class': TextField, 'name':'fnslab', 'value': 'size:', 'style':'Astro.TLabel'}
       , {'class': IntField, 'name':'fnsize', 'value': 12, 'minval':5, 'maxval':50, 'style':'Astro.TEntry', 'persist':0, 'font': 'basefont'}
       , {'class': ComboField, 'name':'boldbtn', 'value': 'inherit', 'values': ('inherit', 'set bold', 'set normal'), 'readonly':1
@@ -945,22 +1125,22 @@ puiopts = {
 
 tkroot = None
 
-class testApp(PanelField):
+class topApp(PanelField):
     """
     This creates the top level environment by using a tkinter.Tk() instead of a Frame as a PanelField would do. This may cause hassle later
     and need to be changed to create a frame within the tkinter.Tk()
     """
     def __init__(self, fvalue, statefile, **kwargs):
+        global tkroot
         self.statepath = pathlib.Path.home() / '.pmtest.cfg' if statefile is None else pathlib.Path(statefile)
         self.loadState()
+        self.widg=tkinter.Tk()
+        tkroot = self.widg
         super().__init__(fvalue = self.fval, **kwargs)
 
     def makeWidget(self):
-        global tkroot
         assert 'toptkparams' in self.fielddef
-        self.widg=tkinter.Tk()
-        tkroot = self.widg
-        self.getRelative('tp1.puiopts').setupfontsandstyles()
+        self.getRelative('tp1/puiopts').setupfontsandstyles()
         if not self.fval is None and 'pstate' in self.fval and 'geom' in self.fval['pstate']:
             self.widg.geometry(self.fval['pstate']['geom']) 
         else:
@@ -971,11 +1151,11 @@ class testApp(PanelField):
         self._makeChildrensWidgets()
 
     def nextTheme(self):
-        tf=self.getRelative('tp1.p1.f1')
+        tf=self.getRelative('tp1/p1/f1')
         tf.setValue(tf.getValue()+'x')
 
     def downTheme(self):
-        tf=self.getRelative('tp1.p2.f1')
+        tf=self.getRelative('tp1/p2/f1')
         tf.setValue(tf.getValue()+'AZ')
 
     def mainloop(self):
@@ -985,7 +1165,7 @@ class testApp(PanelField):
         self.saveState()
 
     def addbtn(self):
-        addto = self.getRelative('tp1.p2')
+        addto = self.getRelative('tp1/p2')
         print('adding to ', addto.myname)
         addto.addChild({'class': CyclicButtonField, 'name':'zz plural z', 'value': 'zeroish', 'values':('zeroish', 'oneish','twoish')}
             , {'row':3, 'column':0, 'columnspan':2}

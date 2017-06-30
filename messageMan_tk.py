@@ -21,7 +21,6 @@ class tklistener(messageMan.baseListener):
     def unregisterlisten(self):
         self.fw.deletefilehandler(self.sockaccept)
 
-
 class tkSocket(messageMan.baseSocket):
     """
     A class to support asynch function calling using a socket like object within a tkinter app at 'this' end.

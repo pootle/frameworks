@@ -13,6 +13,7 @@ no direct user interaction.
 """
 import selectors, time, heapq
 import messageMan
+import sys
 
 class selListener(messageMan.baseListener):
     """
@@ -58,6 +59,7 @@ class timerSelector(selectors.DefaultSelector):
         self.funclist=tuple()
         self.timervals=[]
         self.timers={}
+        self.crashabortcount = 10
         super().__init__()
         self.magentName = name
         self.startedat = time.time()

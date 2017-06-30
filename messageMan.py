@@ -197,7 +197,7 @@ class autoSocket():
         except OSError as oe:
             self.iosock = None
             self.updateState('wait retry',"tryConnect: OSError - %s" % format(oe))
-            elf.setRetryConnect()
+            self.setRetryConnect()
 
     def closeLink(self):
         """
@@ -244,8 +244,14 @@ class autoSocket():
     def runFunc(self, method, **kwargs):
         if self.iosock is None:
             return
-        self.rwagent.writemessage((method,kwargs), self.iosock)
-        self.msgOutCount += 1
+        try:
+            self.rwagent.writemessage((method,kwargs), self.iosock)
+            self.msgOutCount += 1
+        except BrokenPipeError:
+            self.unregisterSocket()
+            self.iosock.close()
+            self.iosock=None
+            self.connectionLost('Broken Pipe')
         self.updateState('running','msg sent')
 
 import pickle
